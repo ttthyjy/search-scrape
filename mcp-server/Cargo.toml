@@ -1,0 +1,43 @@
+[package]
+name = "mcp-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mcp-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "mcp-stdio"
+path = "src/bin/mcp-stdio.rs"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+axum = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "deflate"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+anyhow = "1.0"
+thiserror = "1.0"
+url = "2.4"
+select = "0.6"
+html2text = "0.6"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+# New dependencies for enhanced web scraping
+scraper = "0.19"
+readability = "0.3"
+whatlang = "0.16"
+regex = "1.10"
+percent-encoding = "2.3"
+rand = "0.8"
+# MCP SDK for stdio
+rmcp = { version = "0.5.0", features = ["server", "transport-io"] }
+schemars = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"

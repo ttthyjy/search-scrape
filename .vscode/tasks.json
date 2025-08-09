@@ -1,0 +1,123 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build All Services",
+            "type": "shell",
+            "command": "docker-compose",
+            "args": ["up", "--build", "-d"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Stop All Services",
+            "type": "shell",
+            "command": "docker-compose",
+            "args": ["down"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Test Search API",
+            "type": "shell",
+            "command": "curl",
+            "args": [
+                "-X", "POST",
+                "http://localhost:5000/search",
+                "-H", "Content-Type: application/json",
+                "-d", "{\"query\": \"test search\"}"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "dependsOrder": "sequence",
+            "dependsOn": ["Build All Services"]
+        },
+        {
+            "label": "Build MCP Server",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["build"],
+            "options": {
+                "cwd": "${workspaceFolder}/mcp-server"
+            },
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Run MCP Server Locally",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["run"],
+            "options": {
+                "cwd": "${workspaceFolder}/mcp-server",
+                "env": {
+                    "SEARXNG_URL": "http://localhost:8888",
+                    "RUST_LOG": "debug"
+                }
+            },
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "isBackground": true
+        },
+        {
+            "label": "Test MCP Tools",
+            "type": "shell",
+            "command": "curl",
+            "args": [
+                "-X", "POST",
+                "http://localhost:5000/mcp/call",
+                "-H", "Content-Type: application/json",
+                "-d", "{\"name\": \"search_web\", \"arguments\": {\"query\": \"rust programming\"}}"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "View Service Logs",
+            "type": "shell",
+            "command": "docker-compose",
+            "args": ["logs", "-f"],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "isBackground": true
+        }
+    ]
+}

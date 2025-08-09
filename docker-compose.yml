@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "8888:8080"
+    environment:
+      - BASE_URL=http://localhost:8888
+      - INSTANCE_NAME=SearXNG for MCP
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
+  # Note: MCP server runs natively for better performance and compatibility
+  # To run the MCP server natively:
+  # 1. Build: cargo build --release
+  # 2. HTTP server: SEARXNG_URL=http://localhost:8888 ./target/release/mcp-server
+  # 3. stdio server: SEARXNG_URL=http://localhost:8888 ./target/release/mcp-stdio

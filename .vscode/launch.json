@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug mcp-server",
+      "program": "${workspaceFolder}/mcp-server/target/debug/mcp-server",
+      "args": [],
+      "cwd": "${workspaceFolder}/mcp-server",
+      "env": {
+        "SEARXNG_URL": "http://localhost:8888"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug MCP stdio (Rust)",
+      "program": "${workspaceFolder}/mcp-server/target/debug/mcp-stdio",
+      "args": [],
+      "cwd": "${workspaceFolder}/mcp-server",
+      "env": {
+        "SEARXNG_URL": "http://localhost:8888"
+      }
+    }
+  ]
+}

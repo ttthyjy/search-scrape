@@ -1,0 +1,16 @@
+# Node
+ 
+*.log
+
+# Rust
+mcp-server/target/
+
+ 
+
+# Scrapy
+scrapy-service/webspider/httpcache/
+scrapy-service/webspider/.scrapy/
+
+# Docker
+*.pid
+.DS_Store
