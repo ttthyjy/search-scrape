@@ -20,7 +20,7 @@ A **100% free** search and scraping service using SearXNG for federated search, 
 - **Rust Scraper**: High-performance native web scraping with content extraction and cleanup
 - **Native Rust MCP Server**: Direct MCP protocol implementation exposing `search_web` and `scrape_url` as function tools
 - **Docker Compose**: Containerized deployment for easy setup and scaling
-- **Trae IDE Integration**: Complete MCP tool integration for AI assistants
+- **Vscode, Cursor, Trae: IDE Integration**: Complete MCP tool integration for AI assistants
 
 ## 🚀 Quick Start
 
@@ -35,7 +35,7 @@ curl -X POST "http://localhost:5000/search" \
   -d '{"query": "test search"}'
 ```
 
-### For MCP Tool Integration (Trae IDE)
+### For MCP Tool Integration (Vscode, Cursor, Trae IDE)
 ```bash
 # Build the native MCP server (no Docker needed for MCP)
 cd mcp-server
@@ -130,7 +130,7 @@ Add this to your MCP client configuration:
 
 ### 📸 MCP Tools in Action
 
-Here are screenshots showing the MCP tools working in Trae IDE:
+Here are screenshots showing the MCP tools working in Vscode, Cursor, Trae:
 
 #### Search Web Tool
 ![Search Web Tool Screenshot](docs/Screenshot%202025-08-09%20at%2023.31.06.png)
@@ -205,7 +205,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed debugging instructio
 - **🛡️ Error Handling**: Robust fallbacks and retry mechanisms
 - **🐳 Containerized**: Easy deployment and scaling with Docker Compose
 - **🔒 Privacy-First**: All data processing happens locally - no external API calls with your data
-- **🐛 Development Ready**: Full Trae IDE integration with MCP tools
+- **🐛 Development Ready**: Full Vscode, Cursor, Trae IDE integration with MCP tools
 - **📊 Monitoring**: Health checks and comprehensive logging
 - **🚀 Performance**: Async Rust backend with zero-copy parsing and connection pooling
 - **🔄 Dual Interface**: Both HTTP API and native MCP stdio protocols
