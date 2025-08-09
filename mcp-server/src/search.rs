@@ -1,66 +1,127 @@
 use crate::types::*;
 use crate::AppState;
 use anyhow::{anyhow, Result};
+use backoff::future::retry;
+use backoff::ExponentialBackoffBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+#[derive(Debug, Default, Clone)]
+pub struct SearchParamOverrides {
+    pub engines: Option<String>,       // comma-separated list
+    pub categories: Option<String>,    // comma-separated list
+    pub language: Option<String>,      // e.g., "en" or "en-US"
+    pub safesearch: Option<u8>,        // 0,1,2
+    pub time_range: Option<String>,    // e.g., day, week, month, year
+    pub pageno: Option<u32>,           // 1..N
+}
+
 pub async fn search_web(state: &Arc<AppState>, query: &str) -> Result<Vec<SearchResult>> {
+    search_web_with_params(state, query, None).await
+}
+
+pub async fn search_web_with_params(
+    state: &Arc<AppState>,
+    query: &str,
+    overrides: Option<SearchParamOverrides>,
+) -> Result<Vec<SearchResult>> {
     info!("Searching for: {}", query);
-    
+    // Cache hit fast-path
+    if let Some(cached) = state.search_cache.get(query).await {
+        debug!("search cache hit for query");
+        return Ok(cached);
+    }
+
+    // Acquire rate limiter permit
+    let _permit = state.outbound_limit.acquire().await.expect("semaphore closed");
+
     // Prepare search parameters
-    let mut params = HashMap::new();
-    params.insert("q", query);
-    params.insert("format", "json");
-    params.insert("engines", "duckduckgo,google,bing");
-    params.insert("categories", "general");
-    params.insert("time_range", "");
-    params.insert("language", "en");
-    params.insert("safesearch", "0");
+    let mut params: HashMap<String, String> = HashMap::new();
+    params.insert("q".into(), query.to_string());
+    params.insert("format".into(), "json".into());
+    // Allow override via env
+    let engines = std::env::var("SEARXNG_ENGINES").unwrap_or_else(|_| "duckduckgo,google,bing".to_string());
+    params.insert("engines".into(), engines);
+    params.insert("categories".into(), "general".into());
+    params.insert("time_range".into(), "".into());
+    params.insert("language".into(), "en".into());
+    params.insert("safesearch".into(), "0".into());
+    // Default page number
+    params.insert("pageno".into(), "1".into());
+
+    // Apply overrides if provided
+    if let Some(ov) = overrides {
+    if let Some(v) = ov.engines { if !v.is_empty() { params.insert("engines".into(), v); } }
+    if let Some(v) = ov.categories { if !v.is_empty() { params.insert("categories".into(), v); } }
+    if let Some(v) = ov.language { if !v.is_empty() { params.insert("language".into(), v); } }
+    if let Some(v) = ov.time_range { params.insert("time_range".into(), v); }
+    if let Some(v) = ov.safesearch { params.insert("safesearch".into(), match v { 0 => "0".into(), 1 => "1".into(), 2 => "2".into(), _ => "0".into() }); }
+    if let Some(v) = ov.pageno { params.insert("pageno".into(), v.to_string()); }
+    }
     
     // Build search URL
     let search_url = format!("{}/search", state.searxng_url);
     debug!("Search URL: {}", search_url);
     
-    // Make request to SearXNG
-    let response = state
-        .http_client
-        .get(&search_url)
-        .query(&params)
-        .header("User-Agent", "MCP-Server/1.0")
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| anyhow!("Failed to send request to SearXNG: {}", e))?;
-    
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(anyhow!("SearXNG request failed with status {}: {}", status, error_text));
-    }
-    
-    // Parse response
-    let searxng_response: SearxngResponse = response
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse SearXNG response: {}", e))?;
+    // Make request to SearXNG with retries
+    let client = state.http_client.clone();
+    let search_url_owned = search_url.clone();
+    let params_cloned = params.clone();
+    let searxng_response: SearxngResponse = retry(
+        ExponentialBackoffBuilder::new()
+            .with_initial_interval(std::time::Duration::from_millis(200))
+            .with_max_interval(std::time::Duration::from_secs(2))
+            .with_max_elapsed_time(Some(std::time::Duration::from_secs(4)))
+            .build(),
+        || async {
+            let resp = client
+                .get(&search_url_owned)
+                .query(&params_cloned)
+                .header("User-Agent", "MCP-Server/1.0")
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|e| backoff::Error::transient(anyhow!("Failed to send request to SearXNG: {}", e)))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_else(|_| "".into());
+                let err = anyhow!("SearXNG request failed with status {}: {}", status, text);
+                // 5xx transient, others permanent
+                if status.is_server_error() {
+                    return Err(backoff::Error::transient(err));
+                } else {
+                    return Err(backoff::Error::permanent(err));
+                }
+            }
+            match resp.json::<SearxngResponse>().await {
+                Ok(parsed) => Ok(parsed),
+                Err(e) => Err(backoff::Error::transient(anyhow!("Failed to parse SearXNG response: {}", e))),
+            }
+        },
+    )
+    .await?;
     
     info!("SearXNG returned {} results", searxng_response.results.len());
     
     // Convert to our format
-    let results: Vec<SearchResult> = searxng_response
-        .results
-        .into_iter()
-        .map(|result| SearchResult {
-            url: result.url,
-            title: result.title,
-            content: result.content,
-            engine: Some(result.engine),
-            score: result.score,
-        })
-        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut results: Vec<SearchResult> = Vec::new();
+    for result in searxng_response.results.into_iter() {
+        if seen.insert(result.url.clone()) {
+            results.push(SearchResult {
+                url: result.url,
+                title: result.title,
+                content: result.content,
+                engine: Some(result.engine),
+                score: result.score,
+            });
+        }
+    }
     
     debug!("Converted {} results", results.len());
+    // Fill cache
+    state.search_cache.insert(query.to_string(), results.clone()).await;
     Ok(results)
 }
 
@@ -77,10 +138,10 @@ mod tests {
             return;
         }
         
-        let state = Arc::new(AppState {
-            searxng_url: "http://localhost:8888".to_string(),
-            http_client: reqwest::Client::new(),
-        });
+        let state = Arc::new(AppState::new(
+            "http://localhost:8888".to_string(),
+            reqwest::Client::new(),
+        ));
         
         let results = search_web(&state, "rust programming language").await;
         

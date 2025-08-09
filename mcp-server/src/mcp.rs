@@ -103,7 +103,7 @@ pub async fn call_tool(
                         format!("No search results found for query: {}", query)
                     } else {
                         let mut text = format!("Found {} search results for '{}':\n\n", results.len(), query);
-                        for (i, result) in results.iter().enumerate() {
+                        for (i, result) in results.iter().take(10).enumerate() {
                             text.push_str(&format!(
                                 "{}. **{}**\n   URL: {}\n   Snippet: {}\n\n",
                                 i + 1,
@@ -152,22 +152,31 @@ pub async fn call_tool(
             // Perform scraping - only Rust-native path
             match scrape::scrape_url(&state, url).await {
                 Ok(content) => {
-                    let content_text = format!(
-                        "**{}**\n\nURL: {}\nWord Count: {}\nLanguage: {}\n\n**Content:**\n{}\n\n**Metadata:**\n- Description: {}\n- Keywords: {}\n\n**Headings:**\n{}\n\n**Links Found:** {}\n**Images Found:** {}",
-                        content.title,
-                        content.url,
-                        content.word_count,
-                        content.language,
-                        content.clean_content.chars().take(2000).collect::<String>(),
-                        content.meta_description,
-                        content.meta_keywords,
-                        content.headings.iter()
+                    let content_text = {
+                        let headings = content.headings.iter()
+                            .take(10)
                             .map(|h| format!("- {} {}", h.level.to_uppercase(), h.text))
                             .collect::<Vec<_>>()
-                            .join("\n"),
-                        content.links.len(),
-                        content.images.len()
-                    );
+                            .join("\n");
+                        format!(
+                            "{}\nURL: {}\nCanonical: {}\nWord Count: {} ({}m)\nLanguage: {}\nSite: {}\nAuthor: {}\nPublished: {}\n\nDescription: {}\nOG Image: {}\n\nHeadings:\n{}\n\nLinks: {}  Images: {}\n\nPreview:\n{}",
+                            content.title,
+                            content.url,
+                            content.canonical_url.as_deref().unwrap_or("-"),
+                            content.word_count,
+                            content.reading_time_minutes.unwrap_or(((content.word_count as f64 / 200.0).ceil() as u32).max(1)),
+                            content.language,
+                            content.site_name.as_deref().unwrap_or("-"),
+                            content.author.as_deref().unwrap_or("-"),
+                            content.published_at.as_deref().unwrap_or("-"),
+                            content.meta_description,
+                            content.og_image.as_deref().unwrap_or("-"),
+                            headings,
+                            content.links.len(),
+                            content.images.len(),
+                            content.clean_content.chars().take(1200).collect::<String>()
+                        )
+                    };
                     
                     Ok(Json(McpCallResponse {
                         content: vec![McpContent {

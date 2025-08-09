@@ -3,8 +3,6 @@ use std::env;
 use std::sync::Arc;
 use tracing::{error, info};
 use std::borrow::Cow;
-
-// Re-export types from our main module
 use crate::{search, scrape, AppState};
 
 #[derive(Clone, Debug)]
@@ -35,6 +33,9 @@ impl McpService {
         let state = Arc::new(AppState {
             searxng_url,
             http_client,
+            search_cache: moka::future::Cache::builder().max_capacity(10_000).time_to_live(std::time::Duration::from_secs(60 * 10)).build(),
+            scrape_cache: moka::future::Cache::builder().max_capacity(10_000).time_to_live(std::time::Duration::from_secs(60 * 30)).build(),
+            outbound_limit: Arc::new(tokio::sync::Semaphore::new(32)),
         });
 
         Ok(Self { state })
@@ -67,14 +68,17 @@ impl rmcp::ServerHandler for McpService {
         let tools = vec![
             Tool {
                 name: Cow::Borrowed("search_web"),
-                description: Some(Cow::Borrowed("Search the web using SearXNG federated search engine. Returns a list of relevant URLs with titles and snippets.")),
+                description: Some(Cow::Borrowed("Search the web using SearXNG federated search engine. Supports optional parameters: engines, categories, language, safesearch, time_range, pageno.")),
                 input_schema: match serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query to execute"
-                        }
+                        "query": {"type": "string", "description": "The search query to execute"},
+                        "engines": {"type": "string", "description": "Comma-separated list of engines (overrides env SEARXNG_ENGINES)"},
+                        "categories": {"type": "string", "description": "Comma-separated categories (e.g., general, news, it)"},
+                        "language": {"type": "string", "description": "Language code (e.g., en, en-US)"},
+                        "safesearch": {"type": "integer", "minimum": 0, "maximum": 2, "description": "0=off, 1=moderate, 2=strict"},
+                        "time_range": {"type": "string", "description": "Filter by time (e.g., day, week, month, year)"},
+                        "pageno": {"type": "integer", "minimum": 1, "description": "Page number (1..N)"}
                     },
                     "required": ["query"]
                 }) {
@@ -136,7 +140,17 @@ impl rmcp::ServerHandler for McpService {
                     ))?;
                 
                 // Perform search
-                match search::search_web(&self.state, query).await {
+                // Optional overrides
+                let engines = args.get("engines").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let categories = args.get("categories").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let time_range = args.get("time_range").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let safesearch = args.get("safesearch").and_then(|v| v.as_i64()).and_then(|n| if (0..=2).contains(&n) { Some(n as u8) } else { None });
+                let pageno = args.get("pageno").and_then(|v| v.as_u64()).map(|n| n as u32);
+
+                let overrides = crate::search::SearchParamOverrides { engines, categories, language, safesearch, time_range, pageno };
+
+                match search::search_web_with_params(&self.state, query, Some(overrides)).await {
                     Ok(results) => {
                         let content_text = if results.is_empty() {
                             format!("No search results found for query: {}", query)
@@ -178,16 +192,28 @@ impl rmcp::ServerHandler for McpService {
                         None,
                     ))?;
                 
+                // Force cache invalidation for this URL to ensure fresh scrape
+                self.state.scrape_cache.invalidate(url).await;
+                
                 // Perform scraping
                 match scrape::scrape_url(&self.state, url).await {
                     Ok(content) => {
+                        // Debug: log the actual content length and word count
+                        info!("Scraped content: {} words, {} chars clean_content", content.word_count, content.clean_content.len());
+                        
+                        let content_preview = if content.clean_content.is_empty() {
+                            "[No content extracted - this may indicate a parsing issue]".to_string()
+                        } else {
+                            content.clean_content.chars().take(2000).collect::<String>()
+                        };
+                        
                         let content_text = format!(
                             "**{}**\n\nURL: {}\nWord Count: {}\nLanguage: {}\n\n**Content:**\n{}\n\n**Metadata:**\n- Description: {}\n- Keywords: {}\n\n**Headings:**\n{}\n\n**Links Found:** {}\n**Images Found:** {}",
                             content.title,
                             content.url,
                             content.word_count,
                             content.language,
-                            content.clean_content.chars().take(2000).collect::<String>(),
+                            content_preview,
                             content.meta_description,
                             content.meta_keywords,
                             content.headings.iter()

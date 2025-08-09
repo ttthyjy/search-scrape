@@ -1,12 +1,14 @@
 use crate::types::*;
 use crate::AppState;
 use anyhow::{anyhow, Result};
+use backoff::future::retry;
+use backoff::ExponentialBackoffBuilder;
 use std::sync::Arc;
 use tracing::info;
 use select::predicate::Predicate;
 use crate::rust_scraper::RustScraper;
 
-pub async fn scrape_url(_state: &Arc<AppState>, url: &str) -> Result<ScrapeResponse> {
+pub async fn scrape_url(state: &Arc<AppState>, url: &str) -> Result<ScrapeResponse> {
     info!("Scraping URL: {}", url);
     
     // Validate URL
@@ -14,10 +16,45 @@ pub async fn scrape_url(_state: &Arc<AppState>, url: &str) -> Result<ScrapeRespo
         return Err(anyhow!("Invalid URL: must start with http:// or https://"));
     }
 
-    // Only use Rust-native scraper
+    // Check cache
+    if let Some(cached) = state.scrape_cache.get(url).await {
+        if cached.word_count == 0 || cached.clean_content.trim().is_empty() {
+            // Invalidate poor/empty cache entries and recompute
+            state.scrape_cache.invalidate(url).await;
+        } else {
+            return Ok(cached);
+        }
+    }
+
+    // Concurrency control
+    let _permit = state.outbound_limit.acquire().await.expect("semaphore closed");
+
+    // Only use Rust-native scraper with retries
     let rust_scraper = RustScraper::new();
-    let result = rust_scraper.scrape_url(url).await?;
-    info!("Rust-native scraper succeeded for {}", url);
+    let url_owned = url.to_string();
+    let mut result = retry(
+        ExponentialBackoffBuilder::new()
+            .with_initial_interval(std::time::Duration::from_millis(200))
+            .with_max_interval(std::time::Duration::from_secs(2))
+            .with_max_elapsed_time(Some(std::time::Duration::from_secs(6)))
+            .build(),
+        || async {
+            match rust_scraper.scrape_url(&url_owned).await {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    // Treat network/temporary HTML parse errors as transient
+                    Err(backoff::Error::transient(anyhow!("{}", e)))
+                }
+            }
+        },
+    ).await?;
+    if result.word_count == 0 || result.clean_content.trim().is_empty() {
+        info!("Rust-native scraper returned empty content, using fallback for {}", url);
+        result = scrape_url_fallback(state, &url_owned).await?;
+    } else {
+        info!("Rust-native scraper succeeded for {}", url);
+    }
+    state.scrape_cache.insert(url.to_string(), result.clone()).await;
     Ok(result)
 }
 
@@ -126,7 +163,15 @@ pub async fn scrape_url_fallback(state: &Arc<AppState>, url: &str) -> Result<Scr
         status_code,
         content_type,
         word_count,
-        language: "unknown".to_string(),
+    language: "unknown".to_string(),
+    canonical_url: None,
+    site_name: None,
+    author: None,
+    published_at: None,
+    og_title: None,
+    og_description: None,
+    og_image: None,
+    reading_time_minutes: None,
     };
     
     info!("Fallback scraper extracted {} words", result.word_count);
@@ -140,10 +185,10 @@ mod tests {
     
     #[tokio::test]
     async fn test_scrape_url_fallback() {
-        let state = Arc::new(AppState {
-            searxng_url: "http://localhost:8888".to_string(),
-            http_client: reqwest::Client::new(),
-        });
+        let state = Arc::new(AppState::new(
+            "http://localhost:8888".to_string(),
+            reqwest::Client::new(),
+        ));
         
         let result = scrape_url_fallback(&state, "https://httpbin.org/html").await;
         

@@ -40,6 +40,23 @@ pub struct ScrapeResponse {
     pub content_type: String,
     pub word_count: usize,
     pub language: String,
+    // Optional enriched metadata
+    #[serde(default)]
+    pub canonical_url: Option<String>,
+    #[serde(default)]
+    pub site_name: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub og_title: Option<String>,
+    #[serde(default)]
+    pub og_description: Option<String>,
+    #[serde(default)]
+    pub og_image: Option<String>,
+    #[serde(default)]
+    pub reading_time_minutes: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

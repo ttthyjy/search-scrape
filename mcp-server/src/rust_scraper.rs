@@ -6,6 +6,7 @@ use readability::extractor;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
+use select::{document::Document as SelectDoc, predicate::{Name as SelName, Attr as SelAttr, Predicate}};
 use std::collections::HashSet;
 use tracing::{info, warn};
 use url::Url;
@@ -87,17 +88,23 @@ impl RustScraper {
             .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
         // Parse HTML
-        let document = Html::parse_document(&html);
+    let document = Html::parse_document(&html);
         
         // Extract basic metadata
-        let title = self.extract_title(&document);
-        let meta_description = self.extract_meta_description(&document);
-        let meta_keywords = self.extract_meta_keywords(&document);
+    let title = self.extract_title(&document);
+    let meta_description = self.extract_meta_description(&document);
+    let meta_keywords = self.extract_meta_keywords(&document);
         let language = self.detect_language(&document, &html);
+    let canonical_url = self.extract_canonical(&document, &parsed_url);
+    let site_name = self.extract_site_name(&document);
+    let (og_title, og_description, og_image) = self.extract_open_graph(&document, &parsed_url);
+    let author = self.extract_author(&document);
+    let published_at = self.extract_published_time(&document);
 
         // Extract readable content using readability
         let clean_content = self.extract_clean_content(&html, &parsed_url);
-        let word_count = self.count_words(&clean_content);
+    let word_count = self.count_words(&clean_content);
+    let reading_time_minutes = Some(((word_count as f64 / 200.0).ceil() as u32).max(1));
 
         // Extract structured data
         let headings = self.extract_headings(&document);
@@ -119,6 +126,14 @@ impl RustScraper {
             content_type,
             word_count,
             language,
+            canonical_url,
+            site_name,
+            author,
+            published_at,
+            og_title,
+            og_description,
+            og_image,
+            reading_time_minutes,
         };
 
         info!("Successfully scraped: {} ({} words)", result.title, result.word_count);
@@ -174,6 +189,72 @@ impl RustScraper {
         String::new()
     }
 
+    /// Extract canonical URL
+    fn extract_canonical(&self, document: &Html, base: &Url) -> Option<String> {
+        if let Ok(selector) = Selector::parse("link[rel=\"canonical\"]") {
+            if let Some(el) = document.select(&selector).next() {
+                if let Some(href) = el.value().attr("href") {
+                    return base.join(href).ok().map(|u| u.to_string()).or_else(|| Some(href.to_string()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract site name (OpenGraph fallback)
+    fn extract_site_name(&self, document: &Html) -> Option<String> {
+        if let Ok(selector) = Selector::parse("meta[property=\"og:site_name\"]") {
+            if let Some(el) = document.select(&selector).next() {
+                if let Some(content) = el.value().attr("content") {
+                    let v = content.trim();
+                    if !v.is_empty() { return Some(v.to_string()); }
+                }
+            }
+        }
+        None
+    }
+
+    /// Extract OpenGraph basic fields
+    fn extract_open_graph(&self, document: &Html, base: &Url) -> (Option<String>, Option<String>, Option<String>) {
+        let og_title = if let Ok(sel) = Selector::parse("meta[property=\"og:title\"]") {
+            document.select(&sel).next().and_then(|e| e.value().attr("content")).map(|s| s.trim().to_string())
+        } else { None };
+        let og_description = if let Ok(sel) = Selector::parse("meta[property=\"og:description\"]") {
+            document.select(&sel).next().and_then(|e| e.value().attr("content")).map(|s| s.trim().to_string())
+        } else { None };
+        let og_image = if let Ok(sel) = Selector::parse("meta[property=\"og:image\"]") {
+            document.select(&sel).next().and_then(|e| e.value().attr("content")).and_then(|s| base.join(s).ok().map(|u| u.to_string()).or_else(|| Some(s.to_string())))
+        } else { None };
+        (og_title, og_description, og_image)
+    }
+
+    /// Extract author
+    fn extract_author(&self, document: &Html) -> Option<String> {
+        // Meta author
+        if let Ok(sel) = Selector::parse("meta[name=\"author\"]") {
+            if let Some(el) = document.select(&sel).next() {
+                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+            }
+        }
+        // Article author
+        if let Ok(sel) = Selector::parse("meta[property=\"article:author\"]") {
+            if let Some(el) = document.select(&sel).next() {
+                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+            }
+        }
+        None
+    }
+
+    /// Extract published time
+    fn extract_published_time(&self, document: &Html) -> Option<String> {
+        if let Ok(sel) = Selector::parse("meta[property=\"article:published_time\"]") {
+            if let Some(el) = document.select(&sel).next() {
+                if let Some(content) = el.value().attr("content") { return Some(content.trim().to_string()); }
+            }
+        }
+        None
+    }
+
     /// Detect language from HTML attributes and content
     fn detect_language(&self, document: &Html, html: &str) -> String {
         // Try HTML lang attribute
@@ -214,18 +295,97 @@ impl RustScraper {
         }
     }
 
-    /// Extract clean, readable content using readability
+    /// Extract clean, readable content using readability, preceded by HTML preprocessing
     fn extract_clean_content(&self, html: &str, base_url: &Url) -> String {
-        match extractor::extract(&mut html.as_bytes(), base_url) {
-            Ok(product) => {
-                // Convert HTML to text using html2text
-                html2text::from_read(product.content.as_bytes(), 80)
-            }
-            Err(e) => {
-                warn!("Readability extraction failed: {}, falling back to simple text extraction", e);
-                self.fallback_text_extraction(html)
+        // 1) Pre-clean HTML to strip obvious boilerplate and ads before readability
+        let pre = self.preprocess_html(html);
+
+        // 1a) mdBook-style extractor (e.g., Rust Book) — try focused body first
+        if let Some(md_text) = self.extract_mdbook_like(&pre) {
+            if md_text.len() > 120 { // substantial content
+                return self.post_clean_text(&md_text);
             }
         }
+
+        // 2) Readability pass
+        let readability_text = match extractor::extract(&mut pre.as_bytes(), base_url) {
+            Ok(product) => {
+                let text = html2text::from_read(product.content.as_bytes(), 80);
+                self.post_clean_text(&text)
+            }
+            Err(e) => {
+                warn!("Readability extraction failed: {}, will try heuristics", e);
+                String::new()
+            }
+        };
+
+        // 3) Heuristic main-content extraction (article/main/role=main/etc.)
+        let heuristic_text = self.heuristic_main_extraction(&pre);
+
+        // 4) Choose the better result by word count; be aggressive if one is near-empty
+        let rt_words = self.count_words(&readability_text);
+        let ht_words = self.count_words(&heuristic_text);
+
+        let chosen = if rt_words == 0 && ht_words > 0 {
+            heuristic_text
+        } else if ht_words == 0 && rt_words > 0 {
+            readability_text
+        } else if ht_words > rt_words.saturating_add(20) {
+            heuristic_text
+        } else if rt_words > 0 {
+            readability_text
+        } else {
+            // 5) Fallback to simple whole-document text extraction
+            self.fallback_text_extraction(&pre)
+        };
+
+        // Final sanitize; ensure non-trivial output by adding a last-resort html2text over full doc
+        let final_text = self.post_clean_text(&chosen);
+        if final_text.len() < 80 {
+            let whole = html2text::from_read(pre.as_bytes(), 80);
+            return self.post_clean_text(&whole);
+        }
+        final_text
+    }
+
+    /// Extract content from mdBook-like structures (#content, main, article) using select crate
+    fn extract_mdbook_like(&self, html: &str) -> Option<String> {
+        let doc = SelectDoc::from(html);
+        // Try #content first - this is mdBook's main content container
+        if let Some(node) = doc.find(SelName("div").and(SelAttr("id", "content"))).next() {
+            let inner = node.inner_html();
+            let text = html2text::from_read(inner.as_bytes(), 80);
+            let cleaned = self.clean_text(&text);
+            let word_count = self.count_words(&cleaned);
+            info!("mdBook extractor (#content): {} words", word_count);
+            if word_count > 50 { 
+                return Some(cleaned); 
+            }
+        }
+        // Try main
+        if let Some(node) = doc.find(SelName("main")).next() {
+            let inner = node.inner_html();
+            let text = html2text::from_read(inner.as_bytes(), 80);
+            let cleaned = self.clean_text(&text);
+            let word_count = self.count_words(&cleaned);
+            info!("mdBook extractor (main): {} words", word_count);
+            if word_count > 50 { 
+                return Some(cleaned); 
+            }
+        }
+        // Try article
+        if let Some(node) = doc.find(SelName("article")).next() {
+            let inner = node.inner_html();
+            let text = html2text::from_read(inner.as_bytes(), 80);
+            let cleaned = self.clean_text(&text);
+            let word_count = self.count_words(&cleaned);
+            info!("mdBook extractor (article): {} words", word_count);
+            if word_count > 50 { 
+                return Some(cleaned); 
+            }
+        }
+        info!("mdBook extractor found no suitable content");
+        None
     }
 
     /// Fallback text extraction when readability fails
@@ -257,8 +417,23 @@ impl RustScraper {
         for child in element.children() {
             if let Some(child_element) = scraper::ElementRef::wrap(child) {
                 let tag_name = child_element.value().name();
-                // Skip script and style elements
-                if tag_name == "script" || tag_name == "style" {
+                // Skip noisy/boilerplate elements entirely
+                if matches!(tag_name,
+                    "script" | "style" | "noscript" | "svg" | "canvas" | "iframe" | "form" |
+                    "header" | "footer" | "nav" | "aside") {
+                    continue;
+                }
+
+                // Skip common ad/utility blocks by class/id heuristics
+                let attrs = child_element.value();
+                let mut skip = false;
+                if let Some(id) = attrs.id() {
+                    skip |= self.is_noise_identifier(id);
+                }
+                for class in attrs.classes() {
+                    if self.is_noise_identifier(class) { skip = true; break; }
+                }
+                if skip {
                     continue;
                 }
                 self.extract_text_recursive(&child_element, text_parts);
@@ -268,7 +443,7 @@ impl RustScraper {
         }
     }
 
-    /// Clean extracted text
+    /// Clean extracted text (whitespace normalization)
     fn clean_text(&self, text: &str) -> String {
         // Remove excessive whitespace
         let re_whitespace = Regex::new(r"\s+").unwrap();
@@ -278,6 +453,115 @@ impl RustScraper {
         let cleaned = re_newlines.replace_all(&cleaned, "\n\n");
         
         cleaned.trim().to_string()
+    }
+
+    /// Final post-processing to strip boilerplate lines, trackers, CTA, share/cookie prompts
+    fn post_clean_text(&self, text: &str) -> String {
+        // Normalize first
+    let out = self.clean_text(text);
+
+        // Drop lines matching common garbage patterns
+        let garbage = [
+            r"(?i)subscribe", r"(?i)sign up", r"(?i)cookie", r"(?i)accept all",
+            r"(?i)advert", r"(?i)sponsor", r"(?i)newsletter", r"(?i)\bshare\b", r"(?i)related articles",
+            r"(?i)^comments?$", r"(?i)read more", r"(?i)continue reading", r"(?i)terms of service", r"(?i)privacy policy",
+        ];
+        let re_garbage = Regex::new(&format!("{}", garbage.join("|"))).unwrap();
+
+        let mut kept = Vec::new();
+        for line in out.split('\n') {
+            let line_trim = line.trim();
+            if line_trim.is_empty() { continue; }
+            // Remove very short noisy lines and those matching garbage
+            if line_trim.len() < 3 { continue; }
+            if re_garbage.is_match(line_trim) { continue; }
+            kept.push(line_trim.to_string());
+        }
+
+        // Deduplicate adjacent lines
+        kept.dedup();
+        let result = kept.join("\n");
+        // Collapse too many newlines
+        let re_multi_nl = Regex::new(r"\n{3,}").unwrap();
+        re_multi_nl.replace_all(&result, "\n\n").to_string()
+    }
+
+    /// Preprocess raw HTML by removing whole noisy blocks prior to readability
+    fn preprocess_html(&self, html: &str) -> String {
+        let mut s = html.to_string();
+
+        // Remove whole tag blocks (script/style/etc.)
+        // Rust regex crate doesn't support backreferences; match explicit open/close pairs for safe tags only.
+        let re_block = Regex::new(
+            r"(?is)<(?:script|style|noscript|svg|canvas|iframe)[^>]*?>.*?</(?:script|style|noscript|svg|canvas|iframe)>"
+        ).unwrap();
+        s = re_block.replace_all(&s, " ").to_string();
+
+        // Remove div/section/article with ad/utility classes/ids
+        // Raw string avoids needing to escape quotes/backslashes; (?is) = case-insensitive, dot matches newline
+        let re_ad_blocks = Regex::new(
+            r#"(?is)<(?:div|section|aside|article)[^>]*?(?:id|class)=(?:'|")[^'">]*(?:ads|advert|sponsor|promo|related|cookie|banner|modal|subscribe|newsletter|share|social|sidebar|comments|breadcrumb|pagination)[^'">]*(?:'|")[^>]*?>.*?</(?:div|section|aside|article)>"#
+        ).unwrap();
+        s = re_ad_blocks.replace_all(&s, " ").to_string();
+
+        s
+    }
+
+    /// Identify noisy identifiers by substring match
+    fn is_noise_identifier(&self, ident: &str) -> bool {
+        let ident = ident.to_ascii_lowercase();
+        let needles = [
+            // avoid plain "ad" to not match words like "header"
+            "ads", "advert", "adsense", "adunit", "ad-slot", "ad_container", "adbox",
+            "sponsor", "promo", "cookie", "consent", "banner", "modal",
+            "subscribe", "newsletter", "share", "social", "sidebar", "comments", "related",
+            "breadcrumb", "pagination", "nav", "footer", "header", "hero", "toolbar",
+        ];
+        if needles.iter().any(|n| ident.contains(n)) { return true; }
+        // Additional hyphen/underscore separated ad markers
+        if ident.contains("-ad") || ident.contains("ad-") || ident.contains("_ad") || ident.contains("ad_") { return true; }
+        false
+    }
+
+    /// Heuristic extraction from common main/article containers; returns cleaned text
+    fn heuristic_main_extraction(&self, html: &str) -> String {
+        let document = Html::parse_document(html);
+
+        // Candidate selectors in priority order
+        let selectors = [
+            "article",
+            "main",
+            "[role=main]",
+            "[itemprop=articleBody]",
+            ".entry-content",
+            ".post-content",
+            ".article-content",
+            "#content",
+            "#main",
+            ".content",
+            ".post",
+            ".article",
+        ];
+
+        let mut best_text = String::new();
+        let mut best_words = 0usize;
+
+        for sel_str in selectors.iter() {
+            if let Ok(sel) = Selector::parse(sel_str) {
+                for el in document.select(&sel) {
+                    let mut parts = Vec::new();
+                    self.extract_text_recursive(&el, &mut parts);
+                    let text = self.post_clean_text(&parts.join(" "));
+                    let wc = self.count_words(&text);
+                    if wc > best_words {
+                        best_words = wc;
+                        best_text = text;
+                    }
+                }
+            }
+        }
+
+        best_text
     }
 
     /// Count words in text
@@ -420,6 +704,6 @@ mod tests {
     fn test_word_count() {
         let scraper = RustScraper::new();
         let text = "This is a test with five words";
-        assert_eq!(scraper.count_words(text), 6);
+    assert_eq!(scraper.count_words(text), 7);
     }
 }

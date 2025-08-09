@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         searxng_url,
         http_client,
+        search_cache: moka::future::Cache::builder().max_capacity(10_000).time_to_live(std::time::Duration::from_secs(60 * 10)).build(),
+        scrape_cache: moka::future::Cache::builder().max_capacity(10_000).time_to_live(std::time::Duration::from_secs(60 * 30)).build(),
+        outbound_limit: Arc::new(tokio::sync::Semaphore::new(32)),
     });
 
     // Build router
@@ -126,17 +129,27 @@ async fn chat_handler(
     
     info!("Found {} search results", search_results.len());
     
-    // Step 2: Scrape top results (limit to 3 for demo)
+    // Step 2: Scrape top results concurrently (limit to 5)
+    let top_n = std::env::var("CHAT_SCRAPE_TOP_N").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
+    let to_scrape: Vec<String> = search_results.iter().take(top_n).map(|r| r.url.clone()).collect();
     let mut scraped_content = Vec::new();
-    for result in search_results.iter().take(3) {
-        match scrape::scrape_url(&state, &result.url).await {
-            Ok(content) => {
-                info!("Successfully scraped: {}", result.url);
+    let mut tasks = Vec::new();
+    for url in to_scrape {
+        let state_cloned = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            (url.clone(), scrape::scrape_url(&state_cloned, &url).await)
+        }));
+    }
+    for task in tasks {
+        match task.await {
+            Ok((url, Ok(content))) => {
+                info!("Successfully scraped: {}", url);
                 scraped_content.push(content);
             }
-            Err(e) => {
-                warn!("Failed to scrape {}: {}", result.url, e);
+            Ok((url, Err(e))) => {
+                warn!("Failed to scrape {}: {}", url, e);
             }
+            Err(e) => warn!("Scrape task join error: {}", e),
         }
     }
     
@@ -149,7 +162,14 @@ async fn chat_handler(
         )
     } else {
         let content_summary = scraped_content.iter()
-            .map(|c| format!("**{}**\n{}\n", c.title, c.clean_content.chars().take(500).collect::<String>()))
+            .map(|c| format!(
+                "• {} ({} words, {}m)\n  {}\n  URL: {}\n",
+                c.title,
+                c.word_count,
+                c.reading_time_minutes.unwrap_or(((c.word_count as f64 / 200.0).ceil() as u32).max(1)),
+                c.meta_description,
+                c.canonical_url.as_ref().unwrap_or(&c.url)
+            ))
             .collect::<Vec<_>>()
             .join("\n---\n");
         

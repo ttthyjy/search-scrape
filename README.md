@@ -166,10 +166,6 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed debugging instructio
 
 ```
 ├── docker-compose.yml          # Service orchestration (SearXNG only)
-├── .vscode/                    # Cursor IDE configuration
-│   ├── launch.json             # Debug configurations
-│   ├── settings.json           # Workspace settings
-│   └── tasks.json              # Build & test tasks
 ├── searxng/
 │   ├── settings.yml            # SearXNG configuration
 │   └── uwsgi.ini               # SearXNG uWSGI config
@@ -191,8 +187,6 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed debugging instructio
 │   └── target/
 │       ├── debug/              # Debug builds
 │       └── release/            # Release builds (for MCP)
-├── docs/
-│   └── DEVELOPMENT.md          # Development guide
 └── README.md
 ```
 
