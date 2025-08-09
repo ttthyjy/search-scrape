@@ -44,13 +44,40 @@ pub async fn list_tools() -> Json<McpToolsResponse> {
     let tools = vec![
         McpTool {
             name: "search_web".to_string(),
-            description: "Search the web using SearXNG federated search engine. Returns a list of relevant URLs with titles and snippets.".to_string(),
+            description: "Search the web using SearXNG federated search engine. Supports engines, categories, language, safesearch, time_range, and pageno. Returns a list of relevant URLs with titles and snippets.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "The search query to execute"
+                    },
+                    "engines": {
+                        "type": "string",
+                        "description": "Comma-separated list of engines (e.g., 'google,bing,duckduckgo')"
+                    },
+                    "categories": {
+                        "type": "string",
+                        "description": "Comma-separated list of categories (e.g., 'general,news,it,science')"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Language code (e.g., 'en', 'en-US')"
+                    },
+                    "safesearch": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2,
+                        "description": "Safe search level: 0 (off), 1 (moderate), 2 (strict)"
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "description": "Time filter (e.g., 'day', 'week', 'month', 'year')"
+                    },
+                    "pageno": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Page number for pagination"
                     }
                 },
                 "required": ["query"]
@@ -95,9 +122,30 @@ pub async fn call_tool(
                         }),
                     )
                 })?;
+            // Optional SearXNG overrides
+            let mut overrides = search::SearchParamOverrides::default();
+            if let Some(v) = request.arguments.get("engines").and_then(|v| v.as_str()) {
+                if !v.is_empty() { overrides.engines = Some(v.to_string()); }
+            }
+            if let Some(v) = request.arguments.get("categories").and_then(|v| v.as_str()) {
+                if !v.is_empty() { overrides.categories = Some(v.to_string()); }
+            }
+            if let Some(v) = request.arguments.get("language").and_then(|v| v.as_str()) {
+                if !v.is_empty() { overrides.language = Some(v.to_string()); }
+            }
+            if let Some(v) = request.arguments.get("time_range").and_then(|v| v.as_str()) {
+                overrides.time_range = Some(v.to_string());
+            }
+            if let Some(v) = request.arguments.get("safesearch").and_then(|v| v.as_u64()) {
+                overrides.safesearch = Some(v as u8);
+            }
+            if let Some(v) = request.arguments.get("pageno").and_then(|v| v.as_u64()) {
+                overrides.pageno = Some(v as u32);
+            }
             
             // Perform search
-            match search::search_web(&state, query).await {
+            let ov_opt = Some(overrides);
+            match search::search_web_with_params(&state, query, ov_opt).await {
                 Ok(results) => {
                     let content_text = if results.is_empty() {
                         format!("No search results found for query: {}", query)

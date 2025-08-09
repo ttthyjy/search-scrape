@@ -27,8 +27,23 @@ pub async fn search_web_with_params(
     overrides: Option<SearchParamOverrides>,
 ) -> Result<Vec<SearchResult>> {
     info!("Searching for: {}", query);
+    // Build cache key that includes overrides so different params don't collide
+    let cache_key = if let Some(ref ov) = overrides {
+        format!(
+            "q={}|eng={}|cat={}|lang={}|safe={}|time={}|page={}",
+            query,
+            ov.engines.clone().unwrap_or_default(),
+            ov.categories.clone().unwrap_or_default(),
+            ov.language.clone().unwrap_or_default(),
+            ov.safesearch.map(|v| v.to_string()).unwrap_or_default(),
+            ov.time_range.clone().unwrap_or_default(),
+            ov.pageno.map(|v| v.to_string()).unwrap_or_else(|| "1".into())
+        )
+    } else {
+        format!("q={}|default", query)
+    };
     // Cache hit fast-path
-    if let Some(cached) = state.search_cache.get(query).await {
+    if let Some(cached) = state.search_cache.get(&cache_key).await {
         debug!("search cache hit for query");
         return Ok(cached);
     }
@@ -120,8 +135,8 @@ pub async fn search_web_with_params(
     }
     
     debug!("Converted {} results", results.len());
-    // Fill cache
-    state.search_cache.insert(query.to_string(), results.clone()).await;
+    // Fill cache with composite key
+    state.search_cache.insert(cache_key, results.clone()).await;
     Ok(results)
 }
 
