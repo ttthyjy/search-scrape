@@ -102,16 +102,3 @@ curl -X POST "http://localhost:5000/scrape" \
 ├── searxng/             # SearXNG configuration
 └── docker-compose.yml   # Container orchestration
 ```
-
-## � Performance Optimizations
-
-**Search Improvements:**
-- Full SearXNG parameter support for precise results
-- Engine-specific optimization and fallbacks
-- Smart caching with TTL and invalidation
-
-**Scraping Enhancements:**
-- HTML preprocessing to remove scripts/ads
-- Content-aware extraction (mdBook, GitBook, etc.)  
-- Fallback chains for difficult sites
-- Noise filtering and boilerplate removal
