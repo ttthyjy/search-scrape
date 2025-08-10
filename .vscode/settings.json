@@ -1,6 +1,0 @@
-{
-  "terminal.integrated.env.osx": {
-    "SEARXNG_URL": "http://localhost:8888"
-  },
-  "rust-analyzer.cargo.features": ["all"]
-}
